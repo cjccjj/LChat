@@ -1,7 +1,7 @@
 import debounce from 'lodash/debounce';
-import { useRecoilValue } from 'recoil';
-import { EModelEndpoint } from 'librechat-data-provider';
-import React, { useEffect, useRef, useCallback } from 'react';
+import { useEffect, useRef, useCallback } from 'react';
+import { isAssistantsEndpoint } from 'librechat-data-provider';
+import { useRecoilValue, useSetRecoilState } from 'recoil';
 import type { TEndpointOption } from 'librechat-data-provider';
 import type { KeyboardEvent } from 'react';
 import { forceResize, insertTextAtCursor, getAssistantName } from '~/utils';
@@ -23,28 +23,33 @@ export default function useTextarea({
   submitButtonRef: React.RefObject<HTMLButtonElement>;
   disabled?: boolean;
 }) {
-  const assistantMap = useAssistantsMapContext();
-  const enterToSend = useRecoilValue(store.enterToSend);
-  const {
-    conversation,
-    isSubmitting,
-    latestMessage,
-    setShowBingToneSetting,
-    filesLoading,
-    setFilesLoading,
-  } = useChatContext();
+  const localize = useLocalize();
+  const getSender = useGetSender();
   const isComposing = useRef(false);
   const { handleFiles } = useFileHandling();
-  const getSender = useGetSender();
-  const localize = useLocalize();
+  const assistantMap = useAssistantsMapContext();
+  const enterToSend = useRecoilValue(store.enterToSend);
+
+  const {
+    index,
+    conversation,
+    isSubmitting,
+    filesLoading,
+    latestMessage,
+    setFilesLoading,
+    setShowBingToneSetting,
+  } = useChatContext();
+
+  const setShowMentionPopover = useSetRecoilState(store.showMentionPopoverFamily(index));
 
   const { conversationId, jailbreak, endpoint = '', assistant_id } = conversation || {};
   const isNotAppendable =
     ((latestMessage?.unfinished && !isSubmitting) || latestMessage?.error) &&
-    endpoint !== EModelEndpoint.assistants;
+    !isAssistantsEndpoint(endpoint);
   // && (conversationId?.length ?? 0) > 6; // also ensures that we don't show the wrong placeholder
 
-  const assistant = endpoint === EModelEndpoint.assistants && assistantMap?.[assistant_id ?? ''];
+  const assistant =
+    isAssistantsEndpoint(endpoint) && assistantMap?.[endpoint ?? '']?.[assistant_id ?? ''];
   const assistantName = (assistant && assistant?.name) || '';
 
   // auto focus to input, when enter a conversation.
@@ -82,9 +87,11 @@ export default function useTextarea({
       if (disabled) {
         return localize('com_endpoint_config_placeholder');
       }
+      const currentEndpoint = conversation?.endpoint ?? '';
+      const currentAssistantId = conversation?.assistant_id ?? '';
       if (
-        conversation?.endpoint === EModelEndpoint.assistants &&
-        (!conversation?.assistant_id || !assistantMap?.[conversation?.assistant_id ?? ''])
+        isAssistantsEndpoint(currentEndpoint) &&
+        (!currentAssistantId || !assistantMap?.[currentEndpoint]?.[currentAssistantId ?? ''])
       ) {
         return localize('com_endpoint_assistant_placeholder');
       }
@@ -93,10 +100,9 @@ export default function useTextarea({
         return localize('com_endpoint_message_not_appendable');
       }
 
-      const sender =
-        conversation?.endpoint === EModelEndpoint.assistants
-          ? getAssistantName({ name: assistantName, localize })
-          : getSender(conversation as TEndpointOption);
+      const sender = isAssistantsEndpoint(currentEndpoint)
+        ? getAssistantName({ name: assistantName, localize })
+        : getSender(conversation as TEndpointOption);
 
       return `${localize('com_endpoint_message')} ${sender ? sender : 'ChatGPT'}…`;
     };
@@ -131,6 +137,23 @@ export default function useTextarea({
     textAreaRef,
     assistantMap,
   ]);
+
+  const handleKeyUp = useCallback(() => {
+    const text = textAreaRef.current?.value;
+    if (!(text && text[text.length - 1] === '@')) {
+      return;
+    }
+
+    const startPos = textAreaRef.current?.selectionStart;
+    if (!startPos) {
+      return;
+    }
+
+    const isAtStart = startPos === 1;
+    const isPrecededBySpace = textAreaRef.current?.value.charAt(startPos - 2) === ' ';
+
+    setShowMentionPopover(isAtStart || isPrecededBySpace);
+  }, [textAreaRef, setShowMentionPopover]);
 
   const handleKeyDown = useCallback(
     (e: KeyEvent) => {
@@ -180,15 +203,17 @@ export default function useTextarea({
         return;
       }
 
+      let richText = '';
       let includedText = '';
       const { types } = e.clipboardData;
 
       if (types.indexOf('text/rtf') !== -1 || types.indexOf('Files') !== -1) {
         e.preventDefault();
         includedText = e.clipboardData.getData('text/plain');
+        richText = e.clipboardData.getData('text/rtf');
       }
 
-      if (includedText && e.clipboardData.files.length > 0) {
+      if (includedText && (e.clipboardData.files.length > 0 || richText)) {
         insertTextAtCursor(textAreaRef.current, includedText);
         forceResize(textAreaRef);
       }
@@ -211,6 +236,7 @@ export default function useTextarea({
   return {
     textAreaRef,
     handlePaste,
+    handleKeyUp,
     handleKeyDown,
     handleCompositionStart,
     handleCompositionEnd,
